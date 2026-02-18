@@ -43,5 +43,9 @@ class TrainOptions(BaseOptions):
         parser.add_argument('--heads', type=int, default=6, help='number of down')
         parser.add_argument('--dropout', type=float, default=0.05, help='number of down')
 
+        # validation / early stopping parameters (matching ctpa_cycleGAN)
+        parser.add_argument('--use_validation', action='store_true', help='enable validation loop with best-model saving')
+        parser.add_argument('--patience', type=int, default=50, help='early stopping patience (epochs without improvement)')
+
         self.isTrain = True
         return parser

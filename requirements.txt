@@ -1,0 +1,26 @@
+# # Core PyTorch and deep learning
+# torch>=2.0.0
+# torchvision>=0.15.0
+
+# Medical imaging and MONAI
+dicom2nifti
+monai[all]
+monai-generative
+nibabel
+
+# Data processing
+pandas
+numpy
+h5py
+scikit-image
+
+# Visualization and logging
+matplotlib
+tqdm
+Pillow>=10.0.0
+dominate>=2.8.0
+wandb>=0.16.0
+
+# Utilities
+einops
+argparse

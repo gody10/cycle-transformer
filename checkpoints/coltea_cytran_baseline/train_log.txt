@@ -1,0 +1,18 @@
+2026-02-18 13:17:08,236 - INFO - ============================================================
+2026-02-18 13:17:08,236 - INFO - TRAINING SESSION STARTED
+2026-02-18 13:17:08,236 - INFO - ============================================================
+2026-02-18 13:17:08,236 - INFO - Log file: ./checkpoints/coltea_cytran_baseline/train_log.txt
+2026-02-18 13:17:08,236 - INFO - Checkpoints dir: ./checkpoints/coltea_cytran_baseline
+2026-02-18 13:17:08,236 - INFO - ----------------------------------------
+2026-02-18 13:17:08,236 - INFO - Training Configuration:
+2026-02-18 13:17:08,236 - INFO -   Model: cytran
+2026-02-18 13:17:08,236 - INFO -   Batch size: 4
+2026-02-18 13:17:08,236 - INFO -   Learning rate: 0.0001
+2026-02-18 13:17:08,236 - INFO -   Epochs: 1000 + 500 decay
+2026-02-18 13:17:08,236 - INFO -   Input channels: 1
+2026-02-18 13:17:08,237 - INFO -   Output channels: 1
+2026-02-18 13:17:08,237 - INFO -   GAN mode: lsgan
+2026-02-18 13:17:08,237 - INFO - ----------------------------------------
+2026-02-18 13:17:08,237 - INFO - Loading training volumes and building slice index ...
+2026-02-18 13:17:08,264 - INFO - Found 49/49 valid patients from ../data/Coltea-Lung-CT-100W/clean_train_data.csv
+2026-02-18 13:17:08,266 - INFO - Pre-loading 49 volumes into memory ...

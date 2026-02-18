@@ -58,6 +58,11 @@ class BaseOptions:
         parser.add_argument('--load_iter', type=int, default='0', help='which iteration to load? if load_iter > 0, the code will load models by iter_[load_iter]; otherwise, the code will load models by [epoch]')
         parser.add_argument('--verbose', action='store_true', help='if specified, print more debugging information')
         parser.add_argument('--suffix', default='', type=str, help='customized suffix: opt.name = opt.name + suffix: e.g., {model}_{netG}_size{load_size}')
+        # CSV split parameters (matching ctpa_cycleGAN)
+        parser.add_argument('--train_csv', type=str, default='../data/Coltea-Lung-CT-100W/train_data.csv', help='path to training split CSV (column: --csv_column)')
+        parser.add_argument('--val_csv', type=str, default='../data/Coltea-Lung-CT-100W/eval_data.csv', help='path to validation split CSV')
+        parser.add_argument('--test_csv', type=str, default='../data/Coltea-Lung-CT-100W/test_data.csv', help='path to test split CSV')
+        parser.add_argument('--csv_column', type=str, default='patient_id', help='column name in CSV files containing patient IDs')
         self.initialized = True
         return parser
 

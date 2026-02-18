@@ -1,0 +1,83 @@
+apiVersion: batch/v1
+kind: Job
+metadata:
+    generateName: cytran-
+    labels:
+        kueue.x-k8s.io/queue-name: eidf212ns-user-queue
+spec:
+    parallelism: 1
+    completions: 1
+    template:
+        metadata:
+            name: cytran
+        spec:
+            containers:
+            - name: cytran
+              image: gody10/cycle_trans:latest
+              terminationMessagePath: "/tmp/my-log"
+              imagePullPolicy: 'Always'
+              command: ["/bin/bash"]
+
+              # ──────────────────────────────────────────────────────────
+              # Uncomment ONE args line below depending on what you need.
+              # CSV splits: defaults to train_data.csv / eval_data.csv / test_data.csv
+              #   Add --train_csv / --val_csv / --test_csv to override, e.g.:
+              #   --train_csv ../data/Coltea-Lung-CT-100W/clean_train_data.csv
+              #   --val_csv ../data/Coltea-Lung-CT-100W/clean_eval_data.csv
+              #   --test_csv ../data/Coltea-Lung-CT-100W/clean_test_data.csv
+              # ──────────────────────────────────────────────────────────
+
+              # Option A — Train from scratch (with validation + early stopping)
+              args: ["-c", "python train_with_validation_checkpoints.py --train_csv ../data/Coltea-Lung-CT-100W/clean_train_data.csv --val_csv ../data/Coltea-Lung-CT-100W/clean_eval_data.csv --dataroot ../data/Coltea_Processed_Nifti_Registered --name coltea_cytran_baseline --model cytran --input_nc 1 --output_nc 1 --n_epochs 1000 --n_epochs_decay 500 --batch_size 4 --use_validation --patience 100 --no_html"]
+
+              # Option A (clean CSVs) — Same but using quality-filtered patient lists
+              # args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python train_with_validation_checkpoints.py --dataroot ../data/Coltea_Processed_Nifti_Registered --train_csv ../data/Coltea-Lung-CT-100W/clean_train_data.csv --val_csv ../data/Coltea-Lung-CT-100W/clean_eval_data.csv --name coltea_cytran_clean --model cytran --input_nc 1 --output_nc 1 --n_epochs 100 --n_epochs_decay 100 --batch_size 4 --use_validation --patience 30 --no_html"]
+
+              # Option B — Resume training from checkpoint (change --epoch_count to the epoch to resume from)
+              # args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python train_with_validation_checkpoints.py --dataroot ../data/Coltea_Processed_Nifti_Registered --name coltea_cytran_baseline --model cytran --input_nc 1 --output_nc 1 --continue_train --epoch_count 50 --n_epochs 100 --n_epochs_decay 100 --batch_size 4 --use_validation --patience 30 --no_html"]
+
+              # Option C — Test only (PSNR/SSIM metrics + visual grids)
+              # args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python test.py --dataroot ../data/Coltea_Processed_Nifti_Registered --name coltea_cytran_baseline --model cytran --input_nc 1 --output_nc 1 --epoch best --eval"]
+
+              # Option C (clean CSVs) — Test using clean test split
+              # args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python test.py --dataroot ../data/Coltea_Processed_Nifti_Registered --test_csv ../data/Coltea-Lung-CT-100W/clean_test_data.csv --name coltea_cytran_baseline --model cytran --input_nc 1 --output_nc 1 --epoch best --eval"]
+
+              # Option D — Inference + 3D stitching (for model comparison, no post-processing)
+              #args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python inference_and_stitch.py --dataroot ../data/Coltea_Processed_Nifti_Registered --name coltea_cytran_baseline --model cytran --input_nc 1 --output_nc 1 --epoch best --eval"]
+
+              # Option E — Compare CyTran vs Diffusion (PSNR, SSIM, FID)
+              # args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python compare_models.py --diffusion_dir ../ctpa_medvae_latent_diffusion/predictions_medvae_ldm/ --cyclegan_dir ./results/coltea_cytran_baseline/stitched_3d_epoch_best/ --gt_from_cyclegan --compute_fid --output_dir ./comparison_results/"]
+
+              # Option F — Plot training loss curves
+              # args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python plot_losses.py --name coltea_cytran_baseline"]
+
+              #args: ["-c", "echo 'Uncomment one of the options above'"]
+
+              resources:
+                    requests:
+                        cpu: 10
+                        memory: '64Gi'
+                        nvidia.com/gpu: 1
+                    limits:
+                        cpu: 10
+                        memory: '64Gi'
+                        nvidia.com/gpu: 1
+              volumeMounts:
+                    - mountPath: /cephfs/eidf212/shared/odiamant/
+                      name: pvc
+                    - mountPath: /dev/shm
+                      name: dshm
+            restartPolicy: Never
+            securityContext:
+                runAsUser: 28574
+                runAsNonRoot: true
+                fsGroup: 5376
+            volumes:
+                - name: pvc
+                  persistentVolumeClaim:
+                      claimName: odiamant
+                - name: dshm
+                  emptyDir:
+                      medium: Memory
+            nodeSelector:
+                nvidia.com/gpu.product: NVIDIA-H100-80GB-HBM3
