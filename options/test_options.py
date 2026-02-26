@@ -15,6 +15,12 @@ class TestOptions(BaseOptions):
         # Dropout and Batchnorm has different behaviour during training and test.
         parser.add_argument('--eval', action='store_true', help='use eval mode during test time.')
         parser.add_argument('--num_test', type=int, default=50, help='how many test images to run')
+        # CyTran-specific architecture options (must match training)
+        parser.add_argument('--ngf_cytran', type=int, default=16, help='number of generator filters for CyTran')
+        parser.add_argument('--n_downsampling', type=int, default=3, help='number of downsampling layers')
+        parser.add_argument('--depth', type=int, default=3, help='transformer depth')
+        parser.add_argument('--heads', type=int, default=6, help='number of attention heads')
+        parser.add_argument('--dropout', type=float, default=0.05, help='dropout rate')
         # rewrite default values
         parser.set_defaults(model='test')
         self.isTrain = False

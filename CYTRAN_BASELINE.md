@@ -52,6 +52,10 @@ python test.py \
   --epoch best
 ```
 
+Add `--subtraction_eval` to also compute subtraction metrics (Sub PSNR/SSIM/MAE/RMSE)
+and generate 3-view subtraction visualizations. Add `--save_subtractions` to save
+subtraction NIfTI volumes denormalized to HU.
+
 ### Option D — Honest 3-D stitching (for model comparison)
 
 ```bash
@@ -431,24 +435,51 @@ python test.py \
   --epoch best
 ```
 
+**With subtraction evaluation:**
+
+```bash
+python test.py \
+  --dataroot ../data/Coltea-Lung-CT-100W \
+  --model cytran \
+  --name coltea_cytran_baseline \
+  --epoch best \
+  --subtraction_eval \
+  --save_subtractions
+```
+
 **What it does:**
 1. Loads each test-set patient as a full 3-D volume via `ColteaPairedDataset3D`.
 2. Runs G_A slice-by-slice (domain A→B translation).
 3. Computes per-patient PSNR, SSIM, MAE, RMSE.
 4. Saves 4-panel comparison PNGs (source / prediction / ground truth / difference).
 5. Outputs `metrics.csv`, `test_results.json`, and NIfTI volumes.
+6. (If `--subtraction_eval`) Computes subtraction metrics: Sub PSNR, Sub SSIM, Sub MAE,
+   Sub RMSE by comparing `(source − generated)` vs `(source − ground_truth)`.
+   Generates 3-view (sagittal, coronal, axial) subtraction comparison visualizations.
+7. (If `--save_subtractions`) Saves subtraction NIfTI volumes denormalized to HU.
+
+| Flag | Description |
+|------|-------------|
+| `--subtraction_eval` | Enable subtraction evaluation and visualization |
+| `--save_subtractions` | Save subtraction NIfTI volumes (source − generated, source − ground_truth) in HU |
 
 **Output structure:**
 
 ```
 results/<name>/test_<epoch>/
-├── metrics.csv              # Per-patient metrics table
+├── metrics.csv              # Per-patient metrics table (includes sub_* if --subtraction_eval)
 ├── test_results.json        # Summary statistics (mean ± std)
-├── slices/                  # Comparison PNGs per patient
-└── volumes/
-    ├── <pid>_source.nii.gz
-    ├── <pid>_prediction.nii.gz
-    └── <pid>_ground_truth.nii.gz
+├── visualizations/          # Comparison PNGs per patient
+│   ├── <pid>_slices.png
+│   ├── <pid>_3view_{sagittal,coronal,axial}.png
+│   ├── <pid>_subtractions_{sagittal,coronal,axial}.png  # if --subtraction_eval
+│   └── metrics_summary.png
+├── volumes/
+│   ├── <pid>_pred.nii.gz
+│   └── <pid>_ground_truth.nii.gz
+└── subtractions/            # if --save_subtractions
+    ├── <pid>_subtraction_synthesized.nii.gz
+    └── <pid>_subtraction_gt.nii.gz
 ```
 
 ### Option D — `inference_and_stitch.py` (honest 3-D stitching)
@@ -489,6 +520,10 @@ All metrics are computed on `[0, 1]` range volumes:
 | MAE | `mean(abs(pred - gt))` | Mean absolute error |
 | RMSE | `sqrt(mean((pred - gt)^2))` | Root mean squared error |
 | FID | Inception-v3 features | Used only in `compare_models.py` |
+
+**Subtraction metrics** (with `--subtraction_eval`): compares `(source − generated)` vs
+`(source − ground_truth)`, computing Sub PSNR, Sub SSIM, Sub MAE, Sub RMSE. These
+measure how well the model preserves the contrast difference between source and target.
 
 ---
 
@@ -570,6 +605,8 @@ args:
     --model cytran
     --name coltea_cytran_baseline
     --epoch best
+    --subtraction_eval
+    --save_subtractions
 ```
 
 **Inference:**
