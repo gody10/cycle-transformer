@@ -1,5 +1,8 @@
 # Other Files and Directories
 checkpoints/
+generated_cts/
+checkpoints/
+results/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/

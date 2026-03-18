@@ -22,7 +22,12 @@ WORKDIR /cephfs/eidf212/shared/odiamant/cycle-transformer/
 COPY requirements.txt .
 
 # 6. Install Python dependencies
+# numpy is installed first and pyradiomics built with --no-build-isolation so
+# the legacy setup.py can find numpy headers in the main environment rather
+# than the empty isolated build env.
 RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir "numpy<2" versioneer setuptools "PyWavelets>=1.0.0" SimpleITK pykwalify && \
+    pip install --no-cache-dir --no-build-isolation --no-deps pyradiomics==3.0.0 && \
     pip install --no-cache-dir -r requirements.txt
 
 # 7. Copy the rest of your code (dicom_to_nifti.py) into the container

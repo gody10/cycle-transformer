@@ -42,8 +42,11 @@ spec:
               # Option C (clean CSVs) — Test using clean test split
               #args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python test.py --dataroot ../data/Coltea_Processed_Nifti_Registered --test_csv ../data/Coltea-Lung-CT-100W/test_data.csv --name coltea_cytran_not_clean --model cytran --input_nc 1 --output_nc 1 --epoch best --eval --subtraction_eval --save_subtractions"]
 
-              # Option C (clean model + subtractions) — Evaluate clean model with subtraction metrics
-              args: ["-c", "python test.py --dataroot ../data/Coltea_Processed_Nifti_Registered --test_csv ../data/Coltea-Lung-CT-100W/test_data.csv --name coltea_cytran_clean --model cytran --input_nc 1 --output_nc 1 --epoch best --eval --subtraction_eval --save_subtractions"]
+              # Option C (clean model + all metrics + alignment) — Evaluate clean model with all available metrics
+              # args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python test.py --dataroot ../data/Coltea_Processed_Nifti_Registered --test_csv ../data/Coltea-Lung-CT-100W/test_data.csv --name coltea_cytran_clean --model cytran --input_nc 1 --output_nc 1 --epoch best --eval --subtraction_eval --save_subtractions --roi_eval --fid_eval --frd_eval --frd_num_slices 5 --save_generated_dir ./generated_cts/cytran_clean"]
+
+              # Option G — Re-evaluate FRD from previously saved generated volumes (skip inference)
+              args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python test.py --dataroot ../data/Coltea_Processed_Nifti_Registered --test_csv ../data/Coltea-Lung-CT-100W/test_data.csv --name coltea_cytran_clean --model cytran --input_nc 1 --output_nc 1 --epoch best --eval --subtraction_eval --roi_eval --fid_eval --frd_eval --load_generated_dir ./generated_cts/cytran_clean"]
 
               # Option D — Inference + 3D stitching (for model comparison, no post-processing)
               #args: ["-c", "cd /cephfs/eidf212/shared/odiamant/cycle-transformer && python inference_and_stitch.py --dataroot ../data/Coltea_Processed_Nifti_Registered --name coltea_cytran_baseline --model cytran --input_nc 1 --output_nc 1 --epoch best --eval"]

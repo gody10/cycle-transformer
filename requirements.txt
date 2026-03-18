@@ -10,8 +10,9 @@ nibabel
 
 # Data processing
 pandas
-numpy
+numpy>=1.24.0,<2
 h5py
+SimpleITK
 scikit-image
 
 # Visualization and logging
@@ -24,3 +25,9 @@ wandb>=0.16.0
 # Utilities
 einops
 argparse
+scipy
+torchmetrics[image]
+torch-fidelity
+# pyradiomics is installed separately in the Dockerfile before other deps
+# to work around its broken PyPI packaging (pins PyWavelets<=1.0.0 which
+# fails to build on Python 3.11). See Dockerfile for install instructions.

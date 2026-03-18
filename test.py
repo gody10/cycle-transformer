@@ -94,6 +94,289 @@ def tensor_to_numpy(tensor):
 
 
 # ============================================================================
+# ROI vessel metrics (identical to ctpa_medvae_latent_diffusion/evaluate.py)
+# ============================================================================
+
+def compute_cnr(subtraction: np.ndarray, vessel_mask: np.ndarray) -> float:
+    """
+    Compute Contrast-to-Noise Ratio.
+    CNR = (mean_vessel - mean_background) / std_background
+    """
+    if vessel_mask.sum() == 0 or (~vessel_mask).sum() == 0:
+        return 0.0
+    mean_vessel = float(subtraction[vessel_mask].mean())
+    bg = subtraction[~vessel_mask]
+    std_bg = float(bg.std())
+    if std_bg < 1e-8:
+        return 0.0
+    return float((mean_vessel - float(bg.mean())) / std_bg)
+
+
+def compute_vessel_dice(
+    pred_sub: np.ndarray,
+    gt_sub: np.ndarray,
+    threshold_hu: float = 50.0,
+    hu_range: float = 1000.0,
+) -> float:
+    """Dice coefficient on thresholded vessel regions (subtraction in [-1,1])."""
+    threshold_norm = threshold_hu / hu_range
+    pred_mask = pred_sub > threshold_norm
+    gt_mask = gt_sub > threshold_norm
+    intersection = (pred_mask & gt_mask).sum()
+    total = pred_mask.sum() + gt_mask.sum()
+    if total == 0:
+        return 1.0
+    return float(2 * intersection / total)
+
+
+def create_vessel_mask(
+    subtraction: np.ndarray,
+    threshold_hu: float = 50.0,
+    hu_range: float = 1000.0,
+) -> np.ndarray:
+    """Binary vessel mask from a subtraction image in [-1,1]."""
+    return subtraction > (threshold_hu / hu_range)
+
+
+def compute_roi_metrics(
+    pred_sub: np.ndarray,
+    gt_sub: np.ndarray,
+    vessel_mask: np.ndarray,
+    data_range: float = 2.0,
+) -> dict:
+    """
+    Compute metrics restricted to vessel ROI region.
+
+    Args:
+        pred_sub: Predicted subtraction (D, H, W) in [-1, 1]
+        gt_sub:   Ground-truth subtraction (D, H, W) in [-1, 1]
+        vessel_mask: Boolean mask of vessel regions (from GT subtraction)
+        data_range: Data range for PSNR (2.0 for [-1, 1])
+    """
+    _HU_RANGE = 1000.0
+    metrics = {
+        "roi_dice": compute_vessel_dice(pred_sub, gt_sub),
+        "roi_cnr_gt": compute_cnr(gt_sub, vessel_mask),
+        "roi_cnr_pred": compute_cnr(pred_sub, vessel_mask),
+    }
+    if vessel_mask.sum() > 0:
+        metrics["roi_mae"] = float(np.mean(np.abs(pred_sub[vessel_mask] - gt_sub[vessel_mask])))
+        metrics["roi_mae_hu"] = metrics["roi_mae"] * _HU_RANGE
+        mse = float(np.mean((pred_sub[vessel_mask] - gt_sub[vessel_mask]) ** 2))
+        metrics["roi_psnr"] = float(10 * np.log10((data_range ** 2) / mse)) if mse > 0 else float('inf')
+    else:
+        metrics["roi_mae"] = 0.0
+        metrics["roi_mae_hu"] = 0.0
+        metrics["roi_psnr"] = float('inf')
+    return metrics
+
+
+# ============================================================================
+# FID metric (identical to ctpa_medvae_latent_diffusion/evaluate.py)
+# ============================================================================
+
+def extract_centre_axial_slice_uint8(volume: np.ndarray) -> np.ndarray:
+    """Extract centre axial slice from (D,H,W) volume in [-1,1] as uint8 (H,W,3)."""
+    sl = volume[volume.shape[0] // 2]
+    sl_uint8 = np.clip((sl + 1.0) / 2.0 * 255, 0, 255).astype(np.uint8)
+    return np.stack([sl_uint8] * 3, axis=-1)
+
+
+def compute_fid_2d(real_slices: list, fake_slices: list, device) -> float:
+    """
+    Compute FID between two sets of (H,W,3) uint8 arrays using InceptionV3.
+    Requires torchmetrics.
+    """
+    import os
+    # Redirect torch/hub cache to a writable location (avoids PermissionError on /.cache in containers)
+    os.environ.setdefault("TORCH_HOME", "/cephfs/eidf212/shared/odiamant/.cache/torch")
+    os.makedirs(os.environ["TORCH_HOME"], exist_ok=True)
+    from torchmetrics.image.fid import FrechetInceptionDistance
+    fid_metric = FrechetInceptionDistance(feature=2048, normalize=False).to(device)
+    fid_metric.reset()
+    for sl in real_slices:
+        t = torch.from_numpy(sl).permute(2, 0, 1).unsqueeze(0).to(device)
+        fid_metric.update(t, real=True)
+    for sl in fake_slices:
+        t = torch.from_numpy(sl).permute(2, 0, 1).unsqueeze(0).to(device)
+        fid_metric.update(t, real=False)
+    return float(fid_metric.compute())
+
+
+# ============================================================================
+# FRD metric (Fréchet Radiomic Distance) — copied from evaluate_2d.py
+# Konz et al., 2026
+# ============================================================================
+
+_FRD_GLCM_FEATURES = [
+    "Autocorrelation", "JointAverage", "ClusterProminence", "ClusterShade",
+    "ClusterTendency", "Contrast", "Correlation", "DifferenceAverage",
+    "DifferenceEntropy", "DifferenceVariance", "JointEnergy", "JointEntropy",
+    "Imc1", "Imc2", "Idm", "Idmn", "Id", "Idn", "InverseVariance",
+    "MaximumProbability", "SumEntropy", "SumSquares",
+]
+
+
+def extract_slices_for_radiomics(volume: np.ndarray, num_slices: int = 5) -> list:
+    """(H, W, D) float32 in [0, 1] → list of num_slices (H, W) float32 arrays."""
+    D = volume.shape[2]
+    indices = np.linspace(D // 8, 7 * D // 8, num_slices).astype(int)
+    return [volume[:, :, int(i)].astype(np.float32) for i in indices]
+
+
+def _build_radiomic_extractor(use_wavelet: bool = True):
+    """Create a configured PyRadiomics feature extractor (lazy, cached via caller)."""
+    try:
+        from radiomics import featureextractor
+        import logging
+    except ImportError as e:
+        raise ImportError(
+            "PyRadiomics is required for FRD. Install with: pip install pyradiomics"
+        ) from e
+
+    import logging as _logging
+    _logging.getLogger("radiomics").setLevel(_logging.ERROR)
+
+    settings = {
+        "binWidth": 5,
+        "normalize": True,
+        "normalizeScale": 100,
+        "voxelArrayShift": 300,
+        "force2D": True,
+        "force2Ddimension": 0,
+        "label": 1,
+        "verbose": False,
+        "geometryTolerance": 1e-6,
+    }
+    extractor = featureextractor.RadiomicsFeatureExtractor(**settings)
+    extractor.disableAllFeatures()
+    extractor.enableFeatureClassByName("firstorder")
+    for feat_name in _FRD_GLCM_FEATURES:
+        extractor.enableFeaturesByName(glcm=[feat_name])
+    extractor.enableFeatureClassByName("glrlm")
+    extractor.enableFeatureClassByName("glszm")
+    extractor.enableFeatureClassByName("ngtdm")
+    extractor.disableAllImageTypes()
+    extractor.enableImageTypeByName("Original")
+    if use_wavelet:
+        extractor.enableImageTypeByName("LoG", customArgs={"sigma": [2.0, 3.0, 4.0, 5.0]})
+        extractor.enableImageTypeByName("Wavelet")
+    return extractor
+
+
+def check_frd_runtime_compatibility() -> tuple:
+    """Validate FRD dependencies early to avoid failing only at the end of evaluation."""
+    np_major = int(np.__version__.split(".", 1)[0])
+    if np_major >= 2:
+        return (
+            False,
+            f"NumPy {np.__version__} detected. FRD with current PyRadiomics build requires NumPy < 2.",
+        )
+    try:
+        import radiomics  # noqa: F401
+    except Exception as exc:
+        return False, f"PyRadiomics import failed: {exc}"
+    return True, f"FRD dependencies OK (NumPy {np.__version__})"
+
+
+def extract_radiomic_features(images: list, extractor) -> np.ndarray:
+    """Extract radiomic features from a list of (H, W) float32 [0,1] images.
+
+    Returns (N, ~464) float32 array; failed extractions → zeros.
+    """
+    import SimpleITK as sitk
+
+    all_features = []
+    n_failed = 0
+    fallback = None
+    for image in tqdm(images, desc="Radiomics", leave=False):
+        try:
+            img_uint8 = np.clip(image * 255, 0, 255).astype(np.uint8)
+            img_3d = img_uint8[np.newaxis, :, :].astype(np.float32)  # (1, H, W)
+            sitk_image = sitk.GetImageFromArray(img_3d)
+            sitk_image.SetSpacing((1.0, 1.0, 1.0))
+            mask_3d = np.ones((1, img_uint8.shape[0], img_uint8.shape[1]), dtype=np.uint8)
+            mask_3d[0][0][0] = 0  # corner=0 workaround for PyRadiomics bug #765
+            sitk_mask = sitk.GetImageFromArray(mask_3d)
+            sitk_mask.SetSpacing((1.0, 1.0, 1.0))
+            result = extractor.execute(sitk_image, sitk_mask)
+            feats = np.array(
+                [float(v) for k, v in sorted(result.items())
+                 if not k.startswith("diagnostics_")],
+                dtype=np.float32,
+            )
+            if fallback is None:
+                fallback = np.zeros_like(feats)
+            all_features.append(feats)
+        except Exception:
+            n_failed += 1
+            all_features.append(None)
+
+    if fallback is None:
+        fallback = np.zeros(1, dtype=np.float32)
+    all_features = [f if f is not None else np.zeros_like(fallback) for f in all_features]
+    if n_failed > 0:
+        print(f"  [FRD] Skipped {n_failed}/{len(images)} images due to extraction errors.")
+    features = np.stack(all_features, axis=0)
+    return np.nan_to_num(features, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _zscore_and_pca(features_ref: np.ndarray, features_test: np.ndarray):
+    """Z-score normalise (using ref stats) then PCA-reduce to full-rank size."""
+    mu = np.mean(features_ref, axis=0, keepdims=True)
+    std = np.std(features_ref, axis=0, keepdims=True)
+    std = np.where(std < 1e-10, 1.0, std)
+    ref_norm = (features_ref - mu) / std
+    test_norm = (features_test - mu) / std
+    n, d = ref_norm.shape
+    n_components = max(1, min(n - 1, d))
+    ref_centered = ref_norm - ref_norm.mean(axis=0)
+    _, _, Vt = np.linalg.svd(ref_centered, full_matrices=False)
+    components = Vt[:n_components]
+    ref_pca = ref_centered @ components.T
+    test_pca = (test_norm - ref_norm.mean(axis=0)) @ components.T
+    return ref_pca, test_pca
+
+
+def _frechet_distance(mu1: np.ndarray, sigma1: np.ndarray,
+                      mu2: np.ndarray, sigma2: np.ndarray,
+                      eps: float = 1e-6) -> float:
+    """Fréchet distance between two multivariate Gaussians."""
+    from scipy import linalg
+    diff = mu1 - mu2
+    covmean, _ = linalg.sqrtm(sigma1 @ sigma2, disp=False)
+    if np.iscomplexobj(covmean):
+        if not np.allclose(np.imag(covmean), 0, atol=1e-2):
+            offset = np.eye(sigma1.shape[0]) * eps
+            covmean, _ = linalg.sqrtm((sigma1 + offset) @ (sigma2 + offset), disp=False)
+        covmean = np.real(covmean)
+    if not np.isfinite(covmean).all():
+        offset = np.eye(sigma1.shape[0]) * eps
+        covmean, _ = linalg.sqrtm((sigma1 + offset) @ (sigma2 + offset), disp=False)
+        covmean = np.real(covmean)
+    return float(diff @ diff + np.trace(sigma1 + sigma2 - 2 * covmean))
+
+
+def compute_frd(real_images: list, fake_images: list) -> float:
+    """Compute Fréchet Radiomic Distance between two sets of (H, W) float32 [0,1] images."""
+    try:
+        extractor = _build_radiomic_extractor(use_wavelet=True)
+    except ImportError as e:
+        print(f"  [FRD] Skipping: {e}")
+        return float("nan")
+    print("  Extracting radiomic features for real images ...")
+    feats_real = extract_radiomic_features(real_images, extractor)
+    print("  Extracting radiomic features for fake images ...")
+    feats_fake = extract_radiomic_features(fake_images, extractor)
+    ref_pca, test_pca = _zscore_and_pca(feats_real, feats_fake)
+    mu1 = np.mean(ref_pca, axis=0)
+    sigma1 = np.cov(ref_pca, rowvar=False)
+    mu2 = np.mean(test_pca, axis=0)
+    sigma2 = np.cov(test_pca, rowvar=False)
+    return _frechet_distance(mu1, sigma1, mu2, sigma2)
+
+
+# ============================================================================
 # Publication-quality visualization (matching diffusion model evaluate.py)
 # ============================================================================
 
@@ -790,20 +1073,18 @@ def test_full_volume(model, source_vol, target_vol, opt, patient_id, output_dir)
 
 
 if __name__ == "__main__":
-    import argparse
-
     opt = TestOptions().parse()
     opt.device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
-    # Parse subtraction-specific flags (added after TestOptions to avoid modifying shared options)
-    sub_parser = argparse.ArgumentParser(add_help=False)
-    sub_parser.add_argument('--subtraction_eval', action='store_true',
-                            help='Evaluate subtraction images: compare (source - generated) vs (source - ground_truth)')
-    sub_parser.add_argument('--save_subtractions', action='store_true',
-                            help='Save subtraction NIfTI volumes (source - generated, source - ground_truth) denormalized to HU')
-    sub_args, _ = sub_parser.parse_known_args()
-    subtraction_eval = sub_args.subtraction_eval
-    save_subtractions = sub_args.save_subtractions
+    subtraction_eval = opt.subtraction_eval
+    save_subtractions = opt.save_subtractions
+    roi_eval = opt.roi_eval
+    vessel_threshold_hu = opt.vessel_threshold_hu
+    fid_eval = opt.fid_eval
+    frd_eval = opt.frd_eval
+    frd_num_slices = opt.frd_num_slices
+    save_generated_dir = opt.save_generated_dir
+    load_generated_dir = opt.load_generated_dir
 
     # Hard-code some parameters for test
     opt.num_threads = 0
@@ -830,6 +1111,23 @@ if __name__ == "__main__":
         print("Subtraction evaluation: ENABLED")
     if save_subtractions:
         print("Save subtraction NIfTIs: ENABLED")
+    if roi_eval:
+        print(f"ROI vessel evaluation: ENABLED (threshold={vessel_threshold_hu} HU)")
+    if fid_eval:
+        print("FID evaluation: ENABLED")
+    if frd_eval:
+        print(f"FRD evaluation: ENABLED ({frd_num_slices} slices/volume)")
+        frd_ok, frd_msg = check_frd_runtime_compatibility()
+        if not frd_ok:
+            print(f"  FRD preflight FAILED: {frd_msg}")
+            print("  FRD evaluation DISABLED for this run.")
+            frd_eval = False
+        else:
+            print(f"  {frd_msg}")
+    if save_generated_dir:
+        print(f"Save generated NIfTIs: {save_generated_dir}")
+    if load_generated_dir:
+        print(f"Load generated NIfTIs: {load_generated_dir}")
 
     # Create 3D volume dataset with diffusion-matched normalization
     test_ds = ColteaPairedDataset3D(test_csv, test_col, data_root)
@@ -852,6 +1150,10 @@ if __name__ == "__main__":
 
     # Results storage
     results = []
+    fid_real_slices = []
+    fid_fake_slices = []
+    frd_real_images = []
+    frd_fake_images = []
 
     print(f"\nStarting inference on {len(test_ds)} patients...")
     print("-" * 40)
@@ -863,10 +1165,30 @@ if __name__ == "__main__":
             target_vol = batch["target"].squeeze(0)
 
             try:
-                # Process full 3D volume slice-by-slice
-                generated_vol, gt_vol, input_vol, metrics_dict, src_dhw, gen_dhw, gt_dhw = test_full_volume(
-                    model, source_vol, target_vol, opt, patient_id, output_dir
-                )
+                # Process full 3D volume slice-by-slice (or load from pre-generated dir)
+                if load_generated_dir:
+                    pred_path = os.path.join(load_generated_dir, f"{patient_id}_pred.nii.gz")
+                    generated_vol = nib.load(pred_path).get_fdata().astype(np.float32)
+                    gt_vol = target_vol.squeeze(0).cpu().numpy()
+                    input_vol = source_vol.squeeze(0).cpu().numpy()
+                    vol_psnr = psnr(gt_vol, generated_vol, data_range=1.0)
+                    vol_ssim = ssim_3d(gt_vol, generated_vol, data_range=1.0)
+                    vol_mae = mae(gt_vol, generated_vol)
+                    vol_rmse = rmse(gt_vol, generated_vol)
+                    metrics_dict = {"psnr": vol_psnr, "ssim": vol_ssim, "mae": vol_mae, "rmse": vol_rmse}
+                    src_dhw = np.transpose(input_vol * 2.0 - 1.0, (2, 0, 1))
+                    gen_dhw = np.transpose(generated_vol * 2.0 - 1.0, (2, 0, 1))
+                    gt_dhw  = np.transpose(gt_vol * 2.0 - 1.0, (2, 0, 1))
+                else:
+                    generated_vol, gt_vol, input_vol, metrics_dict, src_dhw, gen_dhw, gt_dhw = test_full_volume(
+                        model, source_vol, target_vol, opt, patient_id, output_dir
+                    )
+                    if save_generated_dir:
+                        os.makedirs(save_generated_dir, exist_ok=True)
+                        nib.save(
+                            nib.Nifti1Image(generated_vol.astype(np.float32), np.eye(4)),
+                            os.path.join(save_generated_dir, f"{patient_id}_pred.nii.gz"),
+                        )
 
                 # ---- Subtraction evaluation: (source - generated) vs (source - ground_truth) ----
                 sub_metrics = {}
@@ -910,10 +1232,30 @@ if __name__ == "__main__":
                         os.path.join(sub_dir, f"{patient_id}_subtraction_gt.nii.gz"),
                     )
 
+                # ---- ROI vessel metrics (operates in [-1, 1] (D, H, W) space) ----
+                roi_metrics = {}
+                if roi_eval:
+                    # src_dhw, gen_dhw, gt_dhw are all (D, H, W) in [-1, 1]
+                    pred_sub_roi = src_dhw - gen_dhw
+                    gt_sub_roi = src_dhw - gt_dhw
+                    vessel_mask = create_vessel_mask(gt_sub_roi, threshold_hu=vessel_threshold_hu)
+                    roi_metrics = compute_roi_metrics(pred_sub_roi, gt_sub_roi, vessel_mask)
+
+                # ---- FID: collect centre axial slices in [-1, 1] (D, H, W) ----
+                if fid_eval:
+                    fid_real_slices.append(extract_centre_axial_slice_uint8(gt_dhw))
+                    fid_fake_slices.append(extract_centre_axial_slice_uint8(gen_dhw))
+
+                # ---- FRD: collect slices from (H, W, D) volumes in [0, 1] ----
+                if frd_eval:
+                    frd_real_images.extend(extract_slices_for_radiomics(gt_vol, frd_num_slices))
+                    frd_fake_images.extend(extract_slices_for_radiomics(generated_vol, frd_num_slices))
+
                 results.append({
                     "patient_id": patient_id,
                     **metrics_dict,
                     **sub_metrics,
+                    **roi_metrics,
                 })
 
                 msg = (f"  {patient_id}: PSNR={metrics_dict['psnr']:.2f} dB | "
@@ -922,6 +1264,10 @@ if __name__ == "__main__":
                        f"RMSE={metrics_dict['rmse']:.4f}")
                 if sub_metrics:
                     msg += f"  | SubPSNR={sub_metrics['sub_psnr']:.2f}, SubSSIM={sub_metrics['sub_ssim']:.4f}"
+                if roi_metrics:
+                    msg += (f"  | Dice={roi_metrics['roi_dice']:.4f}"
+                            f" CNR(GT)={roi_metrics['roi_cnr_gt']:.2f}"
+                            f" CNR(Pred)={roi_metrics['roi_cnr_pred']:.2f}")
                 print(msg)
 
                 # Save NIfTI volumes
@@ -952,8 +1298,34 @@ if __name__ == "__main__":
                         "sub_mae": float('nan'),
                         "sub_rmse": float('nan'),
                     })
+                if roi_eval:
+                    error_entry.update({
+                        "roi_dice": float('nan'),
+                        "roi_cnr_gt": float('nan'),
+                        "roi_cnr_pred": float('nan'),
+                        "roi_mae": float('nan'),
+                        "roi_mae_hu": float('nan'),
+                        "roi_psnr": float('nan'),
+                    })
                 results.append(error_entry)
                 continue
+
+    # ---- Compute 2D FID after full test set ----
+    fid_score = None
+    if fid_eval and fid_real_slices:
+        print("\nComputing 2D FID (centre axial slices, InceptionV3)...")
+        fid_score = compute_fid_2d(fid_real_slices, fid_fake_slices, opt.device)
+        print(f"  FID (2D axial): {fid_score:.4f}")
+
+    # ---- Compute FRD after full test set ----
+    frd_score = None
+    if frd_eval and frd_real_images:
+        print(f"\nComputing FRD ({len(frd_real_images)} slices per set)...")
+        frd_score = compute_frd(frd_real_images, frd_fake_images)
+        if not np.isnan(frd_score):
+            print(f"  FRD (radiomic): {frd_score:.6f}")
+        else:
+            print("  FRD: FAILED (pyradiomics unavailable or extraction error)")
 
     # Save metrics to CSV
     df = pd.DataFrame(results)
@@ -963,6 +1335,8 @@ if __name__ == "__main__":
     metric_names = ["psnr", "ssim", "mae", "rmse"]
     if subtraction_eval:
         metric_names += ["sub_psnr", "sub_ssim", "sub_mae", "sub_rmse"]
+    if roi_eval:
+        metric_names += ["roi_dice", "roi_cnr_gt", "roi_cnr_pred", "roi_mae", "roi_mae_hu", "roi_psnr"]
     aggregate_metrics = {}
     for m in metric_names:
         vals = df[m].dropna()
@@ -970,8 +1344,13 @@ if __name__ == "__main__":
         aggregate_metrics[f"{m}_std"] = float(vals.std())
         aggregate_metrics[f"{m}_min"] = float(vals.min())
         aggregate_metrics[f"{m}_max"] = float(vals.max())
+    if fid_score is not None:
+        aggregate_metrics["fid_2d"] = float(fid_score)
+    if frd_score is not None and not np.isnan(frd_score):
+        aggregate_metrics["frd"] = float(frd_score)
 
     json_results = {
+        "model_name": opt.name,
         "checkpoint": f"{opt.name}/epoch_{opt.epoch}",
         "test_csv": test_csv,
         "num_samples": len(test_ds),
@@ -982,7 +1361,7 @@ if __name__ == "__main__":
         ],
     }
 
-    json_path = os.path.join(output_dir, "test_results.json")
+    json_path = os.path.join(output_dir, "evaluation_results.json")
     with open(json_path, "w") as f:
         json.dump(json_results, f, indent=2)
 
@@ -1010,9 +1389,28 @@ if __name__ == "__main__":
         print(f"Sub SSIM:  {aggregate_metrics['sub_ssim_mean']:.4f} +/- {aggregate_metrics['sub_ssim_std']:.4f}")
         print(f"Sub MAE:   {aggregate_metrics['sub_mae_mean']:.4f} +/- {aggregate_metrics['sub_mae_std']:.4f}")
         print(f"Sub RMSE:  {aggregate_metrics['sub_rmse_mean']:.4f} +/- {aggregate_metrics['sub_rmse_std']:.4f}")
+    if roi_eval:
+        print("-" * 60)
+        print(f"VESSEL ROI METRICS  (threshold = {vessel_threshold_hu} HU)")
+        print("-" * 60)
+        print(f"Dice:         {aggregate_metrics['roi_dice_mean']:.4f} +/- {aggregate_metrics['roi_dice_std']:.4f}")
+        print(f"CNR (GT):     {aggregate_metrics['roi_cnr_gt_mean']:.2f} +/- {aggregate_metrics['roi_cnr_gt_std']:.2f}")
+        print(f"CNR (Pred):   {aggregate_metrics['roi_cnr_pred_mean']:.2f} +/- {aggregate_metrics['roi_cnr_pred_std']:.2f}")
+        print(f"ROI MAE:      {aggregate_metrics['roi_mae_mean']:.4f} +/- {aggregate_metrics['roi_mae_std']:.4f}")
+        print(f"ROI MAE (HU): {aggregate_metrics['roi_mae_hu_mean']:.2f} +/- {aggregate_metrics['roi_mae_hu_std']:.2f} HU")
+        print(f"ROI PSNR:     {aggregate_metrics['roi_psnr_mean']:.2f} +/- {aggregate_metrics['roi_psnr_std']:.2f} dB")
+    if fid_score is not None:
+        print("-" * 60)
+        print(f"FID (2D axial): {fid_score:.4f}")
+    if frd_score is not None and not np.isnan(frd_score):
+        print("-" * 60)
+        print(f"FRD (radiomic): {frd_score:.6f}")
+    elif frd_eval:
+        print("-" * 60)
+        print("FRD: FAILED (see above for error details)")
     print(f"\nResults saved to: {output_dir}")
     print(f"  > Metrics CSV:  metrics.csv")
-    print(f"  > Metrics JSON: test_results.json")
+    print(f"  > Metrics JSON: evaluation_results.json")
     print(f"  > Visualizations: visualizations/ directory")
     print(f"  > Volumes:      volumes/ directory")
     if save_subtractions:
